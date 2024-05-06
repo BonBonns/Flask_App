@@ -1,1 +1,12 @@
-Test resume and job description is provided
+# CV Scoring Web APP 
+
+## To Run 
+
+User will need to specify their Chat Gpt API code. 
+A Test resume and job description is provided. 
+Run with: Python3 app.py
+
+## Other Features 
+
+As applicant upload their resumes files, the program will store the results and compare the user's score to previous applicats.  
+  
