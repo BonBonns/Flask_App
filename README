@@ -8,5 +8,5 @@ Run with: Python3 app.py
 
 ## Other Features 
 
-As applicant upload their resumes files, the program will store the results and compare the user's score to previous applicats.  
+As applicants upload their resumes, the program will store the results and compare the user's score to previous applicats for the same job.  
   
