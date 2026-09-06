@@ -1,0 +1,68 @@
+name: verify-apple-cms
+
+on:
+  push:
+    paths:
+      - .github/workflows/verify-apple-cms.yml
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: System version
+        shell: bash
+        run: |
+          sw_vers
+          uname -a
+          which security
+          shasum -a 256 /usr/bin/security
+
+      - name: Confirm cms command
+        shell: bash
+        run: |
+          set +e
+          security help cms 2>&1
+          echo "help_exit=$?"
+          security cms -h 2>&1
+          echo "cms_help_exit=$?"
+
+      - name: Show binary CMS strings
+        shell: bash
+        run: |
+          strings /usr/bin/security | grep -i -A3 -B3 "create a CMS enveloped message" || true
+          strings /usr/bin/security | grep -i "create envelope for these recipients" || true
+
+      - name: Test 127 recipients
+        shell: bash
+        run: |
+          set +e
+          R=$(python3 -c 'print(",".join(["x"]*127))')
+          security cms -E -r "$R" </dev/null >cms127.out 2>cms127.err
+          echo "exit=$?"
+          cat cms127.out
+          cat cms127.err
+          exit 0
+
+      - name: Test 128 recipients
+        shell: bash
+        run: |
+          set +e
+          R=$(python3 -c 'print(",".join(["x"]*128))')
+          security cms -E -r "$R" </dev/null >cms128.out 2>cms128.err
+          echo "exit=$?"
+          cat cms128.out
+          cat cms128.err
+          exit 0
+
+      - name: Test 129 recipients
+        shell: bash
+        run: |
+          set +e
+          R=$(python3 -c 'print(",".join(["x"]*129))')
+          security cms -E -r "$R" </dev/null >cms129.out 2>cms129.err
+          echo "exit=$?"
+          cat cms129.out
+          cat cms129.err
+          exit 0
