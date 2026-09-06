@@ -11,13 +11,42 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
-      - name: System version
+      - name: System version and binary identity
         shell: bash
         run: |
+          set +e
           sw_vers
           uname -a
           which security
           shasum -a 256 /usr/bin/security
+          file /usr/bin/security
+          codesign -dvvv /usr/bin/security 2>&1 || true
+          dwarfdump --uuid /usr/bin/security 2>&1 || true
+          otool -L /usr/bin/security 2>&1 || true
+          echo '=== build/version-looking strings ==='
+          strings /usr/bin/security | grep -Ei '61901|Security-[0-9]|ProjectName|SourceVersion|BuildVersion|CFBundleVersion' | head -100 || true
+
+      - name: Inspect CMS symbols and strings
+        shell: bash
+        run: |
+          set +e
+          echo '=== nm cms-related symbols ==='
+          nm -nm /usr/bin/security 2>&1 | grep -Ei 'cms_util|cmsutil|recipient|envelop' | head -200 || true
+          echo '=== strings around cms interface ==='
+          strings -a -t x /usr/bin/security | grep -Ei 'create a CMS enveloped message|create envelope for these recipients|problem enveloping|failed to find certificate with email' || true
+          echo '=== section layout ==='
+          size -m /usr/bin/security 2>&1 || true
+          echo '=== all global-ish symbols mentioning ptr/recipient ==='
+          nm -nm /usr/bin/security 2>&1 | grep -Ei 'ptrarray|recipient|nrecip' | head -200 || true
+
+      - name: Try static disassembly around cms_util
+        shell: bash
+        run: |
+          set +e
+          xcrun llvm-nm -nm /usr/bin/security 2>&1 | grep -Ei 'cms_util|cmsutil' || true
+          xcrun llvm-objdump --macho --syms /usr/bin/security 2>&1 | grep -Ei 'cms_util|cmsutil' || true
+          echo '=== disassembly labels around cms ==='
+          xcrun llvm-objdump --macho --disassemble /usr/bin/security 2>&1 | grep -n -Ei 'cms_util|problem enveloping|recipient' | head -100 || true
 
       - name: Create isolated keychain and S/MIME recipient certificate
         shell: bash
@@ -33,8 +62,13 @@ jobs:
           security find-certificate -a -e "$EMAIL" "$KEYCHAIN"
           printf 'hello from cms boundary test\n' > "$RUNNER_TEMP/msg.txt"
 
-      - name: Exercise recipient counts
+      - name: Exercise recipient counts with malloc diagnostics
         shell: bash
+        env:
+          MallocScribble: '1'
+          MallocPreScribble: '1'
+          MallocCheckHeapStart: '1'
+          MallocCheckHeapEach: '1'
         run: |
           set +e
           KEYCHAIN="$RUNNER_TEMP/cms-test.keychain-db"
