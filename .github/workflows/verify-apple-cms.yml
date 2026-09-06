@@ -30,8 +30,9 @@ jobs:
           security unlock-keychain -p "$PASS" "$KEYCHAIN"
           security list-keychains -d user -s "$KEYCHAIN"
           openssl req -x509 -newkey rsa:2048 -keyout "$RUNNER_TEMP/key.pem" -out "$RUNNER_TEMP/cert.pem" -days 1 -nodes -subj "/CN=CMS Test/emailAddress=$EMAIL"
-          openssl pkcs12 -export -inkey "$RUNNER_TEMP/key.pem" -in "$RUNNER_TEMP/cert.pem" -out "$RUNNER_TEMP/test.p12" -passout pass:"$PASS"
-          security import "$RUNNER_TEMP/test.p12" -k "$KEYCHAIN" -P "$PASS" -T /usr/bin/security
+          # Encryption only needs the public recipient certificate. Importing the PEM directly
+          # also avoids PKCS#12 compatibility differences between runner OpenSSL versions.
+          security add-certificates -k "$KEYCHAIN" "$RUNNER_TEMP/cert.pem"
           security find-certificate -a -e "$EMAIL" "$KEYCHAIN"
           printf 'hello\n' > "$RUNNER_TEMP/msg.txt"
 
@@ -45,7 +46,9 @@ jobs:
             R=$(python3 -c "print(','.join(['$EMAIL']*$N))")
             echo "===== -v BEFORE -r, N=$N ====="
             /usr/bin/security cms -E -v -k "$KEYCHAIN" -r "$R" -i "$RUNNER_TEMP/msg.txt" -o "$RUNNER_TEMP/out-$N.cms" >"$RUNNER_TEMP/$N.stdout" 2>"$RUNNER_TEMP/$N.stderr"
-            echo "exit=$? bytes=$(wc -c < "$RUNNER_TEMP/out-$N.cms" 2>/dev/null || echo 0)"
+            status=$?
+            bytes=$(wc -c < "$RUNNER_TEMP/out-$N.cms" 2>/dev/null || echo 0)
+            echo "exit=$status bytes=$bytes"
             echo '--- stderr ---'
             cat "$RUNNER_TEMP/$N.stderr"
           done
