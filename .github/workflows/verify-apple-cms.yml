@@ -33,38 +33,21 @@ jobs:
           security find-certificate -a -e "$EMAIL" "$KEYCHAIN"
           printf 'hello from cms boundary test\n' > "$RUNNER_TEMP/msg.txt"
 
-      - name: Sanity check one valid recipient
+      - name: Exercise recipient counts
         shell: bash
         run: |
           set +e
           KEYCHAIN="$RUNNER_TEMP/cms-test.keychain-db"
           EMAIL='cms-test@example.com'
-          /usr/bin/security cms -E -k "$KEYCHAIN" -r "$EMAIL" -i "$RUNNER_TEMP/msg.txt" -o "$RUNNER_TEMP/one.cms" >"$RUNNER_TEMP/one.out" 2>"$RUNNER_TEMP/one.err"
-          rc=$?
-          echo "one_recipient_exit=$rc"
-          cat "$RUNNER_TEMP/one.out"
-          cat "$RUNNER_TEMP/one.err"
-          test "$rc" -eq 0
-          test -s "$RUNNER_TEMP/one.cms"
-
-      - name: Test 127 128 129 valid recipients
-        shell: bash
-        run: |
-          set +e
-          KEYCHAIN="$RUNNER_TEMP/cms-test.keychain-db"
-          EMAIL='cms-test@example.com'
-          for N in 127 128 129; do
+          for N in 1 127 128 129 160 256 512 1024; do
             echo "===== recipient_count=$N ====="
             R=$(python3 -c "import sys; n=int(sys.argv[1]); e=sys.argv[2]; print(','.join([e]*n))" "$N" "$EMAIL")
             /usr/bin/security cms -E -k "$KEYCHAIN" -r "$R" -i "$RUNNER_TEMP/msg.txt" -o "$RUNNER_TEMP/cms-$N.der" >"$RUNNER_TEMP/cms-$N.out" 2>"$RUNNER_TEMP/cms-$N.err"
             rc=$?
             echo "exit=$rc"
             if [ -f "$RUNNER_TEMP/cms-$N.der" ]; then wc -c "$RUNNER_TEMP/cms-$N.der"; fi
-            echo '--- stdout ---'
             cat "$RUNNER_TEMP/cms-$N.out"
-            echo '--- stderr ---'
             cat "$RUNNER_TEMP/cms-$N.err"
-            echo '--- crash reports ---'
             find "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports -maxdepth 1 -type f -iname 'security*' -mmin -5 -print 2>/dev/null || true
           done
           exit 0
