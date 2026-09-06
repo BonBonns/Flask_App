@@ -11,88 +11,65 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
-      - name: Prepare shipping binary
+      - name: Identify shipping binary
         shell: bash
         run: |
           set -euxo pipefail
           sw_vers
           strings /usr/bin/security | grep 'PROGRAM:security' || true
           shasum -a 256 /usr/bin/security
-          lipo /usr/bin/security -thin x86_64 -output "$RUNNER_TEMP/security.x86_64"
-          xcrun llvm-objdump --macho --disassemble --no-show-raw-insn "$RUNNER_TEMP/security.x86_64" > "$RUNNER_TEMP/security.dis"
 
-      - name: Dynamically find recipient array and adjacent globals
+      - name: Create temporary S-MIME recipient
         shell: bash
         run: |
-          python3 - <<'PY'
-          import os,re
-          from pathlib import Path
-          lines=(Path(os.environ['RUNNER_TEMP'])/'security.dis').read_text(errors='replace').splitlines()
-          addr_re=re.compile(r'^([0-9a-f]+):')
-          rip_re=re.compile(r'^([0-9a-f]+):.*?([+-]?0x[0-9a-f]+)\(%rip\)')
+          set -euxo pipefail
+          KEYCHAIN="$RUNNER_TEMP/cms-test.keychain-db"
+          PASS=testpass
+          EMAIL=test@example.com
+          security create-keychain -p "$PASS" "$KEYCHAIN"
+          security unlock-keychain -p "$PASS" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+          openssl req -x509 -newkey rsa:2048 -keyout "$RUNNER_TEMP/key.pem" -out "$RUNNER_TEMP/cert.pem" -days 1 -nodes -subj "/CN=CMS Test/emailAddress=$EMAIL"
+          openssl pkcs12 -export -inkey "$RUNNER_TEMP/key.pem" -in "$RUNNER_TEMP/cert.pem" -out "$RUNNER_TEMP/test.p12" -passout pass:"$PASS"
+          security import "$RUNNER_TEMP/test.p12" -k "$KEYCHAIN" -P "$PASS" -T /usr/bin/security
+          security find-certificate -a -e "$EMAIL" "$KEYCHAIN"
+          printf 'hello\n' > "$RUNNER_TEMP/msg.txt"
 
-          def next_addr(i):
-              for j in range(i+1,min(i+5,len(lines))):
-                  m=addr_re.search(lines[j])
-                  if m: return int(m.group(1),16)
-              return None
+      - name: Boundary test with verbose flag before recipient list
+        shell: bash
+        run: |
+          set +e
+          EMAIL=test@example.com
+          KEYCHAIN="$RUNNER_TEMP/cms-test.keychain-db"
+          for N in 127 128 129; do
+            R=$(python3 -c "print(','.join(['$EMAIL']*$N))")
+            echo "===== -v BEFORE -r, N=$N ====="
+            /usr/bin/security cms -E -v -k "$KEYCHAIN" -r "$R" -i "$RUNNER_TEMP/msg.txt" -o "$RUNNER_TEMP/out-$N.cms" >"$RUNNER_TEMP/$N.stdout" 2>"$RUNNER_TEMP/$N.stderr"
+            echo "exit=$? bytes=$(wc -c < "$RUNNER_TEMP/out-$N.cms" 2>/dev/null || echo 0)"
+            echo '--- stderr ---'
+            cat "$RUNNER_TEMP/$N.stderr"
+          done
 
-          def rip_target(i):
-              m=rip_re.search(lines[i])
-              if not m: return None
-              n=next_addr(i)
-              if n is None: return None
-              s=m.group(2)
-              d=-int(s[3:],16) if s.startswith('-0x') else int(s,16)
-              return n+d
+      - name: Option-order control at 128 recipients
+        shell: bash
+        run: |
+          set +e
+          EMAIL=test@example.com
+          KEYCHAIN="$RUNNER_TEMP/cms-test.keychain-db"
+          R=$(python3 -c "print(','.join(['$EMAIL']*128))")
 
-          # Identify the specific parser by the tight strchr -> strdup -> inc -> store sequence.
-          parser=None
-          for i,l in enumerate(lines):
-              if '_strchr' not in l: continue
-              window='\n'.join(lines[i:min(len(lines),i+18)])
-              if '_strdup' not in window or 'incq' not in window: continue
-              # Find RIP-relative LEA feeding the indexed pointer store just before strchr.
-              for k in range(max(0,i-18),i):
-                  if '\tleaq\t' in lines[k] and '(%rip)' in lines[k]:
-                      t=rip_target(k)
-                      if t is not None:
-                          # Require indexed LEA using rcx shortly after this base load.
-                          nearby='\n'.join(lines[k:min(i+2,k+8)])
-                          if '(%rcx,%rbx,8)' in nearby:
-                              parser=(i,k,t)
-              if parser: break
+          echo '===== CONTROL A: -v BEFORE -r ====='
+          /usr/bin/security cms -E -v -k "$KEYCHAIN" -r "$R" -i "$RUNNER_TEMP/msg.txt" -o "$RUNNER_TEMP/a.cms" >"$RUNNER_TEMP/a.stdout" 2>"$RUNNER_TEMP/a.stderr"
+          echo "exit=$?"
+          cat "$RUNNER_TEMP/a.stderr"
 
-          if not parser:
-              raise SystemExit('FAILED: could not uniquely locate cms recipient parser')
+          echo '===== CONTROL B: -v AFTER -r ====='
+          /usr/bin/security cms -E -k "$KEYCHAIN" -r "$R" -v -i "$RUNNER_TEMP/msg.txt" -o "$RUNNER_TEMP/b.cms" >"$RUNNER_TEMP/b.stdout" 2>"$RUNNER_TEMP/b.stderr"
+          echo "exit=$?"
+          cat "$RUNNER_TEMP/b.stderr"
 
-          strchr_i, base_i, base = parser
-          end=base+128*8
-          print('=== dynamically located parser ===')
-          print(f'strchr_line={strchr_i+1}')
-          print(f'base_load_line={base_i+1}: {lines[base_i]}')
-          print(f'PTRARRAY_BASE=0x{base:x}')
-          print(f'PTRARRAY_LAST_SLOT=0x{base+127*8:x}')
-          print(f'PTRARRAY_ONE_PAST=0x{end:x}')
-          print('\n=== parser window ===')
-          for j in range(max(0,base_i-8),min(len(lines),strchr_i+25)):
-              print(f'{j+1:06d}: {lines[j]}')
-
-          refs=[]
-          for i,l in enumerate(lines):
-              t=rip_target(i)
-              if t is not None and base-64 <= t <= end+256:
-                  refs.append((t,i,l))
-
-          targets=sorted(set(t for t,_,_ in refs if t>=end))
-          print('\n=== first referenced globals at/after one-past ===')
-          for t in targets[:20]:
-              print(f'0x{t:x} delta={t-base} (0x{t-base:x})')
-
-          for t in targets[:8]:
-              print(f'\n===== XREFS target=0x{t:x} delta={t-base} =====')
-              for _,i,l in [x for x in refs if x[0]==t]:
-                  print(f'XREF line={i+1}: {l}')
-                  for j in range(max(0,i-8),min(len(lines),i+9)):
-                      print(f'{j+1:06d}: {lines[j]}')
-          PY
+          echo '===== verbose markers ====='
+          printf 'before-r received-commands count: '
+          grep -c 'received commands' "$RUNNER_TEMP/a.stderr" || true
+          printf 'after-r received-commands count: '
+          grep -c 'received commands' "$RUNNER_TEMP/b.stderr" || true
