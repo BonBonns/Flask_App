@@ -11,7 +11,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
-      - name: Prepare x86_64 shipping binary
+      - name: Prepare shipping binary
         shell: bash
         run: |
           set -euxo pipefail
@@ -21,80 +21,57 @@ jobs:
           lipo /usr/bin/security -thin x86_64 -output "$RUNNER_TEMP/security.x86_64"
           xcrun llvm-objdump --macho --disassemble --no-show-raw-insn "$RUNNER_TEMP/security.x86_64" > "$RUNNER_TEMP/security.dis"
 
-      - name: Show Mach-O data and bss layout
-        shell: bash
-        run: |
-          set +e
-          echo '=== section headers ==='
-          xcrun llvm-objdump --macho --section-headers "$RUNNER_TEMP/security.x86_64" || true
-          echo '=== otool DATA/BSS load-command details ==='
-          otool -l "$RUNNER_TEMP/security.x86_64" | awk '
-            /segname __DATA|segname __DATA_CONST|sectname __bss|sectname __common|sectname __data/ {show=1; n=0}
-            show {print; n++}
-            show && n>18 {show=0}
-          ' || true
-          echo '=== symbols around candidate region ==='
-          nm -nm "$RUNNER_TEMP/security.x86_64" 2>&1 | grep -Ei '0000000100039|ptrarray|recipient|cms' | head -300 || true
-
-      - name: Prove parser base and enumerate nearby global references
+      - name: Map recipient array and following globals
         shell: bash
         run: |
           python3 - <<'PY'
           import os,re
           from pathlib import Path
           lines=(Path(os.environ['RUNNER_TEMP'])/'security.dis').read_text(errors='replace').splitlines()
-
-          # x86_64 RIP-relative target = next instruction address + signed displacement.
-          pat=re.compile(r'^([0-9a-f]+):.*?\b(leaq|movq|cmp[bql]?|mov[bql]?)\s+([+-]?0x[0-9a-f]+)\(%rip\)')
-          addr_pat=re.compile(r'^([0-9a-f]+):')
+          addr_re=re.compile(r'^([0-9a-f]+):')
+          rip_re=re.compile(r'^([0-9a-f]+):.*?([+-]?0x[0-9a-f]+)\(%rip\)')
           refs=[]
           for i,l in enumerate(lines):
-              m=pat.search(l)
+              m=rip_re.search(l)
               if not m: continue
-              cur=int(m.group(1),16)
-              # derive next instruction from next disassembly line carrying an address
               nxt=None
               for j in range(i+1,min(i+5,len(lines))):
-                  mm=addr_pat.search(lines[j])
+                  mm=addr_re.search(lines[j])
                   if mm:
                       nxt=int(mm.group(1),16); break
               if nxt is None: continue
-              disp=int(m.group(3),16) if not m.group(3).startswith('-') else -int(m.group(3)[1:],16)
+              ds=m.group(2)
+              disp=-int(ds[3:],16) if ds.startswith('-0x') else int(ds,16)
               target=nxt+disp
-              if 0x100039000 <= target <= 0x10003a500:
-                  refs.append((target,i+1,l))
+              if 0x100039800 <= target <= 0x10003a000:
+                  refs.append((target,i,l))
 
-          print('=== all RIP-relative refs into 0x100039000..0x10003a500 ===')
-          for t,ln,l in sorted(refs):
-              print(f'target=0x{t:x} line={ln}: {l}')
+          base=0x100039830
+          end=base+128*8
+          print(f'PTRARRAY_BASE=0x{base:x}')
+          print(f'PTRARRAY_LAST_SLOT=0x{base+127*8:x}')
+          print(f'PTRARRAY_ONE_PAST=0x{end:x}')
+          print('\n=== referenced targets from base onward ===')
+          for t in sorted(set(t for t,_,_ in refs if t>=base)):
+              print(f'0x{t:x} delta={t-base} (0x{t-base:x})')
 
-          print('\n=== exact parser window ===')
-          for i,l in enumerate(lines):
-              if '_strchr' in l and 1500 < i < 1800:
-                  for x in lines[max(0,i-35):min(len(lines),i+40)]: print(x)
-                  break
-
-          print('\n=== candidate ptrarray base calculation ===')
-          # Known parser LEA observed in prior run: 0x100002bf1 with next instruction 0x100002bf8, disp 0x36c38.
-          base=0x100002bf8 + 0x36c38
-          print(f'parser_base = 0x{base:x}')
-          print(f'base_plus_128_pointers = 0x{base + 128*8:x}')
-          print(f'base_plus_127_pointers = 0x{base + 127*8:x}')
-
-          near=sorted({t for t,_,_ in refs if t>=base})
-          print('referenced_targets_at_or_after_base:')
-          for t in near[:80]: print(f'  0x{t:x} delta=0x{t-base:x} ({t-base})')
+          for target in sorted(set(t for t,_,_ in refs if t>=end))[:12]:
+              print(f'\n===== XREFS TO 0x{target:x} delta={target-base} =====')
+              hits=[(i,l) for t,i,l in refs if t==target]
+              for n,(i,l) in enumerate(hits,1):
+                  print(f'--- xref {n}: line {i+1}: {l}')
+                  lo=max(0,i-55); hi=min(len(lines),i+56)
+                  for j in range(lo,hi):
+                      print(f'{j+1:06d}: {lines[j]}')
           PY
 
-      - name: Look specifically for object boundary at base plus 1024
+      - name: Dump symbol and relocation clues around boundary
         shell: bash
         run: |
           set +e
-          DIS="$RUNNER_TEMP/security.dis"
-          echo 'candidate base:       0x100039830'
-          echo 'base + 1024 bytes:    0x100039c30'
-          echo 'base + 1016 bytes:    0x100039c28'
-          echo '=== raw disassembly references around expected end ==='
-          grep -n -Ei '39c[0-9a-f]{2}|39830|36[bc][0-9a-f]{2}\(%rip\)' "$DIS" | head -400 || true
-          echo '=== Mach-O symbols ordered around expected boundary ==='
-          nm -n "$RUNNER_TEMP/security.x86_64" 2>&1 | awk '$1 >= "0000000100039800" && $1 <= "000000010003a200" {print}' || true
+          echo '=== nm around BSS range ==='
+          nm -an "$RUNNER_TEMP/security.x86_64" 2>&1 | awk '$1 >= "0000000100039800" && $1 <= "000000010003a000" {print}' || true
+          echo '=== relocations ==='
+          otool -rv "$RUNNER_TEMP/security.x86_64" 2>&1 | grep -Ei '39830|39c30|39c38|39c50' -C 8 || true
+          echo '=== strings that may name nearby state ==='
+          strings -a /usr/bin/security | grep -Ei 'cms|recipient|password|keychain|verbose|update_single|dumpstate' | head -300 || true
