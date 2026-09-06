@@ -30,49 +30,49 @@ jobs:
           security unlock-keychain -p "$PASS" "$KEYCHAIN"
           security list-keychains -d user -s "$KEYCHAIN"
           openssl req -x509 -newkey rsa:2048 -keyout "$RUNNER_TEMP/key.pem" -out "$RUNNER_TEMP/cert.pem" -days 1 -nodes -subj "/CN=CMS Test/emailAddress=$EMAIL"
-          # Encryption only needs the public recipient certificate. Importing the PEM directly
-          # also avoids PKCS#12 compatibility differences between runner OpenSSL versions.
           security add-certificates -k "$KEYCHAIN" "$RUNNER_TEMP/cert.pem"
-          security find-certificate -a -e "$EMAIL" "$KEYCHAIN"
+          security find-certificate -a -e "$EMAIL" "$KEYCHAIN" >/dev/null
           printf 'hello\n' > "$RUNNER_TEMP/msg.txt"
 
-      - name: Boundary test with verbose flag before recipient list
+      - name: Run 127 128 129 option-order matrix
         shell: bash
         run: |
           set +e
           EMAIL=test@example.com
           KEYCHAIN="$RUNNER_TEMP/cms-test.keychain-db"
+          mkdir -p "$RUNNER_TEMP/results"
+
           for N in 127 128 129; do
             R=$(python3 -c "print(','.join(['$EMAIL']*$N))")
-            echo "===== -v BEFORE -r, N=$N ====="
-            /usr/bin/security cms -E -v -k "$KEYCHAIN" -r "$R" -i "$RUNNER_TEMP/msg.txt" -o "$RUNNER_TEMP/out-$N.cms" >"$RUNNER_TEMP/$N.stdout" 2>"$RUNNER_TEMP/$N.stderr"
-            status=$?
-            bytes=$(wc -c < "$RUNNER_TEMP/out-$N.cms" 2>/dev/null || echo 0)
-            echo "exit=$status bytes=$bytes"
-            echo '--- stderr ---'
-            cat "$RUNNER_TEMP/$N.stderr"
+            for ORDER in before after; do
+              for REP in 1 2; do
+                ERR="$RUNNER_TEMP/results/${N}-${ORDER}-${REP}.err"
+                OUT="$RUNNER_TEMP/results/${N}-${ORDER}-${REP}.cms"
+                if [ "$ORDER" = before ]; then
+                  /usr/bin/security cms -E -v -k "$KEYCHAIN" -r "$R" -i "$RUNNER_TEMP/msg.txt" -o "$OUT" > /dev/null 2>"$ERR"
+                else
+                  /usr/bin/security cms -E -k "$KEYCHAIN" -r "$R" -v -i "$RUNNER_TEMP/msg.txt" -o "$OUT" > /dev/null 2>"$ERR"
+                fi
+                STATUS=$?
+                MARKERS=$(grep -c 'received commands' "$ERR" 2>/dev/null || true)
+                BYTES=$(wc -c < "$OUT" 2>/dev/null || echo 0)
+                echo "RESULT N=$N ORDER=$ORDER REP=$REP EXIT=$STATUS VERBOSE_MARKERS=$MARKERS BYTES=$BYTES"
+                sed -n '1,20p' "$ERR"
+              done
+            done
           done
 
-      - name: Option-order control at 128 recipients
+      - name: Show recent security crash reports
+        if: always()
         shell: bash
         run: |
           set +e
-          EMAIL=test@example.com
-          KEYCHAIN="$RUNNER_TEMP/cms-test.keychain-db"
-          R=$(python3 -c "print(','.join(['$EMAIL']*128))")
-
-          echo '===== CONTROL A: -v BEFORE -r ====='
-          /usr/bin/security cms -E -v -k "$KEYCHAIN" -r "$R" -i "$RUNNER_TEMP/msg.txt" -o "$RUNNER_TEMP/a.cms" >"$RUNNER_TEMP/a.stdout" 2>"$RUNNER_TEMP/a.stderr"
-          echo "exit=$?"
-          cat "$RUNNER_TEMP/a.stderr"
-
-          echo '===== CONTROL B: -v AFTER -r ====='
-          /usr/bin/security cms -E -k "$KEYCHAIN" -r "$R" -v -i "$RUNNER_TEMP/msg.txt" -o "$RUNNER_TEMP/b.cms" >"$RUNNER_TEMP/b.stdout" 2>"$RUNNER_TEMP/b.stderr"
-          echo "exit=$?"
-          cat "$RUNNER_TEMP/b.stderr"
-
-          echo '===== verbose markers ====='
-          printf 'before-r received-commands count: '
-          grep -c 'received commands' "$RUNNER_TEMP/a.stderr" || true
-          printf 'after-r received-commands count: '
-          grep -c 'received commands' "$RUNNER_TEMP/b.stderr" || true
+          echo '=== crash report files ==='
+          find "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports \
+            -maxdepth 1 -type f \( -iname 'security*.ips' -o -iname 'security*.crash' \) \
+            -mmin -10 -print 2>/dev/null | tee "$RUNNER_TEMP/crashes.txt"
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            echo "===== $f ====="
+            sed -n '1,220p' "$f"
+          done < "$RUNNER_TEMP/crashes.txt"
