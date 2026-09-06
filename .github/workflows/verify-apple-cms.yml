@@ -26,19 +26,9 @@ jobs:
           KEYCHAIN="$RUNNER_TEMP/cms-test.keychain-db"
           PASS='cms-test-pass'
           EMAIL='cms-test@example.com'
-
           security create-keychain -p "$PASS" "$KEYCHAIN"
           security unlock-keychain -p "$PASS" "$KEYCHAIN"
-
-          openssl req -x509 -newkey rsa:2048 \
-            -keyout "$RUNNER_TEMP/key.pem" \
-            -out "$RUNNER_TEMP/cert.pem" \
-            -days 1 -nodes \
-            -subj "/CN=CMS Test/emailAddress=$EMAIL" \
-            -addext "subjectAltName=email:$EMAIL" \
-            -addext "keyUsage=digitalSignature,keyEncipherment" \
-            -addext "extendedKeyUsage=emailProtection"
-
+          openssl req -x509 -newkey rsa:2048 -keyout "$RUNNER_TEMP/key.pem" -out "$RUNNER_TEMP/cert.pem" -days 1 -nodes -subj "/CN=CMS Test/emailAddress=$EMAIL" -addext "subjectAltName=email:$EMAIL" -addext "keyUsage=digitalSignature,keyEncipherment" -addext "extendedKeyUsage=emailProtection"
           security import "$RUNNER_TEMP/cert.pem" -k "$KEYCHAIN"
           security find-certificate -a -e "$EMAIL" "$KEYCHAIN"
           printf 'hello from cms boundary test\n' > "$RUNNER_TEMP/msg.txt"
@@ -49,9 +39,7 @@ jobs:
           set +e
           KEYCHAIN="$RUNNER_TEMP/cms-test.keychain-db"
           EMAIL='cms-test@example.com'
-          /usr/bin/security cms -E -k "$KEYCHAIN" -r "$EMAIL" \
-            -i "$RUNNER_TEMP/msg.txt" -o "$RUNNER_TEMP/one.cms" \
-            >"$RUNNER_TEMP/one.out" 2>"$RUNNER_TEMP/one.err"
+          /usr/bin/security cms -E -k "$KEYCHAIN" -r "$EMAIL" -i "$RUNNER_TEMP/msg.txt" -o "$RUNNER_TEMP/one.cms" >"$RUNNER_TEMP/one.out" 2>"$RUNNER_TEMP/one.err"
           rc=$?
           echo "one_recipient_exit=$rc"
           cat "$RUNNER_TEMP/one.out"
@@ -65,28 +53,18 @@ jobs:
           set +e
           KEYCHAIN="$RUNNER_TEMP/cms-test.keychain-db"
           EMAIL='cms-test@example.com'
-
           for N in 127 128 129; do
             echo "===== recipient_count=$N ====="
-            R=$(python3 - "$N" "$EMAIL" <<'PY'
-import sys
-n = int(sys.argv[1])
-email = sys.argv[2]
-print(','.join([email] * n))
-PY
-)
-            /usr/bin/security cms -E -k "$KEYCHAIN" -r "$R" \
-              -i "$RUNNER_TEMP/msg.txt" -o "$RUNNER_TEMP/cms-$N.der" \
-              >"$RUNNER_TEMP/cms-$N.out" 2>"$RUNNER_TEMP/cms-$N.err"
+            R=$(python3 -c "import sys; n=int(sys.argv[1]); e=sys.argv[2]; print(','.join([e]*n))" "$N" "$EMAIL")
+            /usr/bin/security cms -E -k "$KEYCHAIN" -r "$R" -i "$RUNNER_TEMP/msg.txt" -o "$RUNNER_TEMP/cms-$N.der" >"$RUNNER_TEMP/cms-$N.out" 2>"$RUNNER_TEMP/cms-$N.err"
             rc=$?
             echo "exit=$rc"
-            echo "output_bytes=$(wc -c < "$RUNNER_TEMP/cms-$N.der" 2>/dev/null || echo 0)"
+            if [ -f "$RUNNER_TEMP/cms-$N.der" ]; then wc -c "$RUNNER_TEMP/cms-$N.der"; fi
             echo '--- stdout ---'
             cat "$RUNNER_TEMP/cms-$N.out"
             echo '--- stderr ---'
             cat "$RUNNER_TEMP/cms-$N.err"
             echo '--- crash reports ---'
-            find "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports \
-              -maxdepth 1 -type f -iname 'security*' -mmin -5 -print 2>/dev/null || true
+            find "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports -maxdepth 1 -type f -iname 'security*' -mmin -5 -print 2>/dev/null || true
           done
           exit 0
